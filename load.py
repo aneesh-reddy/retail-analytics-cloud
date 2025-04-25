@@ -3,11 +3,12 @@ import glob
 import pandas as pd
 from azure.storage.blob import BlobServiceClient
 from sqlalchemy import create_engine, text
+import urllib.parse
 
 # ── Configuration ───────────────────────────────────────
 STORAGE_ACCOUNT = "retailstoreacct2025"
 STORAGE_KEY     = os.getenv("STORAGE_KEY")  # export this beforehand
-SERVER_NAME     = "retailsqlsrv29"
+SERVER_NAME     = "retailsqlsrv29.database.windows.net"
 DB_NAME         = "RetailDB"
 DB_USER         = "sqladmin"
 DB_PASS         = "YourStrongP@ss!"
@@ -34,10 +35,10 @@ def download_blobs():
 def discover_files():
     """Find the three CSVs by their 400_ prefix."""
     files = glob.glob("data/raw/**/*.csv", recursive=True)
-    household = next(f for f in files if os.path.basename(f).lower().startswith("400_household"))
-    transactions = next(f for f in files if os.path.basename(f).lower().startswith("400_transaction"))
-    products = next(f for f in files if os.path.basename(f).lower().startswith("400_product"))
-    return household, transactions, products
+    h = next(f for f in files if os.path.basename(f).lower().startswith("400_household"))
+    t = next(f for f in files if os.path.basename(f).lower().startswith("400_transaction"))
+    p = next(f for f in files if os.path.basename(f).lower().startswith("400_product"))
+    return h, t, p
 
 def load_into_sql():
     """Load the downloaded CSVs into Azure SQL via pymssql."""
@@ -57,10 +58,11 @@ def load_into_sql():
         if "DATE" in col.upper() or "PURCHASE" in col.upper():
             df_t[col] = pd.to_datetime(df_t[col], errors="coerce")
 
-    # Build a pymssql connection URL
+    # URL-encode the password so '@' and '!' are safe
+    enc_pass = urllib.parse.quote_plus(DB_PASS)
     conn_url = (
-        f"mssql+pymssql://{DB_USER}:{DB_PASS}"
-        f"@{SERVER_NAME}.database.windows.net:1433/{DB_NAME}"
+        f"mssql+pymssql://{DB_USER}:{enc_pass}"
+        f"@{SERVER_NAME}:1433/{DB_NAME}"
     )
     engine = create_engine(conn_url)
 
@@ -70,25 +72,19 @@ def load_into_sql():
 
     # Bulk load in chunks
     print("Writing households...")
-    df_h.to_sql(
-        "households", engine,
-        if_exists="replace", index=False,
-        method="multi", chunksize=5000
-    )
+    df_h.to_sql("households", engine,
+                if_exists="replace", index=False,
+                method="multi", chunksize=5000)
 
     print("Writing transactions...")
-    df_t.to_sql(
-        "transactions", engine,
-        if_exists="replace", index=False,
-        method="multi", chunksize=5000
-    )
+    df_t.to_sql("transactions", engine,
+                if_exists="replace", index=False,
+                method="multi", chunksize=5000)
 
     print("Writing products...")
-    df_p.to_sql(
-        "products", engine,
-        if_exists="replace", index=False,
-        method="multi", chunksize=5000
-    )
+    df_p.to_sql("products", engine,
+                if_exists="replace", index=False,
+                method="multi", chunksize=5000)
 
     # Verify row counts
     with engine.connect() as conn:
