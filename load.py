@@ -1,120 +1,114 @@
+#!/usr/bin/env python3
 import os
-import glob
-import re
 import pandas as pd
-from azure.storage.blob import BlobServiceClient
-from sqlalchemy import create_engine, text
-import urllib.parse
+from azure.storage.blob import ContainerClient
+from sqlalchemy import create_engine
+from urllib.parse import quote_plus
 
-# ── Configuration ───────────────────────────────────────
-STORAGE_ACCOUNT = "retailstoreacct2025"
-STORAGE_KEY     = os.getenv("STORAGE_KEY")  # export this beforehand
-SERVER_NAME     = "retailsqlsrv29.database.windows.net"
-DB_NAME         = "RetailDB"
-DB_USER         = "sqladmin"
-DB_PASS         = "YourStrongP@ss!"
-# ────────────────────────────────────────────────────────
+# ─── CONFIGURATION ─────────────────────────────────────────────────────────────
+# Make sure these environment variables are set:
+#   STORAGE_ACCOUNT, STORAGE_KEY, CONTAINER_NAME
+#   DB_USER, DB_PASS, DB_SERVER, DB_NAME
 
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Strip whitespace and collapse multiple spaces in column names."""
-    def clean(name: str) -> str:
-        # strip, then replace any run of whitespace with single underscore
-        return re.sub(r"\s+", "_", name.strip())
-    df.columns = [clean(col) for col in df.columns]
-    return df
+STORAGE_ACCOUNT   = os.getenv("STORAGE_ACCOUNT")
+STORAGE_KEY       = os.getenv("STORAGE_KEY")
+CONTAINER_NAME    = os.getenv("CONTAINER_NAME")
 
+DB_USER           = os.getenv("DB_USER")
+DB_PASS           = os.getenv("DB_PASS")
+DB_SERVER         = os.getenv("DB_SERVER")   # e.g. retailsqlsrv29.database.windows.net
+DB_NAME           = os.getenv("DB_NAME")     # e.g. retail_db
+
+# ─── STEP 1: DOWNLOAD ALL BLOBS ─────────────────────────────────────────────────
 def download_blobs():
-    """Download all CSVs from the rawdata container into data/raw/."""
+    print("Step 1: Downloading blobs from Azure Storage…")
     conn_str = (
         f"DefaultEndpointsProtocol=https;"
         f"AccountName={STORAGE_ACCOUNT};"
         f"AccountKey={STORAGE_KEY};"
         f"EndpointSuffix=core.windows.net"
     )
-    client = BlobServiceClient.from_connection_string(conn_str)
-    container = client.get_container_client("rawdata")
+    client = ContainerClient.from_connection_string(conn_str, container_name=CONTAINER_NAME)
 
-    for blob in container.list_blobs():
+    for blob in client.list_blobs():
         local_path = os.path.join("data", "raw", blob.name)
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        print(f"Downloading {blob.name} → {local_path}")
+        print(f"  • {blob.name} → {local_path}")
         with open(local_path, "wb") as f:
-            f.write(container.download_blob(blob).readall())
+            stream = client.download_blob(blob)
+            f.write(stream.readall())
 
+
+# ─── HELPERS TO FIND CSV FILES ───────────────────────────────────────────────────
 def discover_files():
-    """Find the three CSVs by their 400_ prefix."""
-    files = glob.glob("data/raw/**/*.csv", recursive=True)
-    h = next(f for f in files if os.path.basename(f).lower().startswith("400_household"))
-    t = next(f for f in files if os.path.basename(f).lower().startswith("400_transaction"))
-    p = next(f for f in files if os.path.basename(f).lower().startswith("400_product"))
-    return h, t, p
+    base = os.path.join("data", "raw")
+    files = {
+        "households":   None,
+        "transactions": None,
+        "products":     None,
+    }
+    for root, _, names in os.walk(base):
+        for fn in names:
+            path = os.path.join(root, fn)
+            if fn.lower().endswith("households.csv"):
+                files["households"] = path
+            elif fn.lower().endswith("transactions.csv"):
+                files["transactions"] = path
+            elif fn.lower().endswith("products.csv"):
+                files["products"] = path
 
+    missing = [k for k,v in files.items() if v is None]
+    if missing:
+        raise FileNotFoundError(f"Could not discover files for: {missing}")
+    return files["households"], files["transactions"], files["products"]
+
+
+# ─── STEP 2–5: LOAD INTO AZURE SQL ───────────────────────────────────────────────
 def load_into_sql():
-    """Load the downloaded CSVs into Azure SQL via pymssql."""
+    print("\nStep 2–5: Loading data into Azure SQL…")
     h_file, t_file, p_file = discover_files()
     print("Files to load:")
-    print("  Households:   ", h_file)
-    print("  Transactions: ", t_file)
-    print("  Products:     ", p_file)
+    print(f"  Households:   {h_file}")
+    print(f"  Transactions: {t_file}")
+    print(f"  Products:     {p_file}")
 
-    # Read all columns
+    # read CSVs
     df_h = pd.read_csv(h_file)
     df_t = pd.read_csv(t_file)
     df_p = pd.read_csv(p_file)
 
-    # Normalize column names to safe identifiers
-    df_h = normalize_columns(df_h)
-    df_t = normalize_columns(df_t)
-    df_p = normalize_columns(df_p)
+    # parse any date columns in transactions (if present)
+    for c in df_t.columns:
+        if "date" in c.lower() or "purchase" in c.lower():
+            df_t[c] = pd.to_datetime(df_t[c], errors="coerce")
 
-    # Auto-parse any date-like columns in transactions
-    for col in df_t.columns:
-        if "DATE" in col.upper() or "PURCHASE" in col.upper():
-            df_t[col] = pd.to_datetime(df_t[col], errors="coerce")
-
-    # URL-encode the password so special chars are safe
-    enc_pass = urllib.parse.quote_plus(DB_PASS)
+    # build connection URL
+    pwd = quote_plus(DB_PASS)
     conn_url = (
-        f"mssql+pymssql://{DB_USER}:{enc_pass}"
-        f"@{SERVER_NAME}:1433/{DB_NAME}"
+        f"mssql+pymssql://{DB_USER}:{pwd}@{DB_SERVER}/{DB_NAME}"
     )
     engine = create_engine(conn_url)
 
-    # Test the connection
-    with engine.connect() as conn:
-        print("Connection test:", conn.execute(text("SELECT 1")).scalar())
+    # test connectivity
+    print("\nConnection test:", engine.connect().closed == False)
 
-    # Bulk load in chunks
-    print("Writing households...")
-    df_h.to_sql(
-        "households", engine,
-        if_exists="replace", index=False,
-        method="multi", chunksize=5000
-    )
+    # write each DataFrame in small batches
+    for name, df in [
+        ("households",   df_h),
+        ("transactions", df_t),
+        ("products",     df_p),
+    ]:
+        print(f"\nWriting {name}…")
+        df.to_sql(
+            name, engine,
+            if_exists="replace", index=False,
+            method="multi",
+            chunksize=500     # ← much smaller batches
+        )
+    print("\nAll tables written successfully.")
 
-    print("Writing transactions...")
-    df_t.to_sql(
-        "transactions", engine,
-        if_exists="replace", index=False,
-        method="multi", chunksize=5000
-    )
 
-    print("Writing products...")
-    df_p.to_sql(
-        "products", engine,
-        if_exists="replace", index=False,
-        method="multi", chunksize=5000
-    )
-
-    # Verify row counts
-    with engine.connect() as conn:
-        for tbl in ["households", "transactions", "products"]:
-            cnt = conn.execute(text(f"SELECT COUNT(*) FROM {tbl}")).scalar()
-            print(f"{tbl}: {cnt} rows")
-
+# ─── MAIN ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("Step 1: Downloading blobs from Azure Storage…")
     download_blobs()
-    print("\nStep 2–5: Loading data into Azure SQL…")
     load_into_sql()
-    print("\n✅ All done!")
