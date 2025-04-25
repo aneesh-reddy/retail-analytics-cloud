@@ -42,11 +42,7 @@ def download_blobs():
 # ─── HELPERS TO FIND CSV FILES ───────────────────────────────────────────────────
 def discover_files():
     base = os.path.join("data", "raw")
-    files = {
-        "households":   None,
-        "transactions": None,
-        "products":     None,
-    }
+    files = {"households": None, "transactions": None, "products": None}
     for root, _, names in os.walk(base):
         for fn in names:
             path = os.path.join(root, fn)
@@ -77,6 +73,10 @@ def load_into_sql():
     df_t = pd.read_csv(t_file)
     df_p = pd.read_csv(p_file)
 
+    # only keep the first 10,000 transactions
+    df_t = df_t.head(10_000)
+    print(f"Truncated transactions to {len(df_t)} rows")
+
     # parse any date columns in transactions (if present)
     for c in df_t.columns:
         if "date" in c.lower() or "purchase" in c.lower():
@@ -90,7 +90,8 @@ def load_into_sql():
     engine = create_engine(conn_url)
 
     # test connectivity
-    print("\nConnection test:", engine.connect().closed == False)
+    with engine.connect() as conn:
+        print("Connection successful")
 
     # write each DataFrame in small batches
     for name, df in [
@@ -103,7 +104,7 @@ def load_into_sql():
             name, engine,
             if_exists="replace", index=False,
             method="multi",
-            chunksize=500     # ← much smaller batches
+            chunksize=500     # small batches to avoid parameter limits
         )
     print("\nAll tables written successfully.")
 
