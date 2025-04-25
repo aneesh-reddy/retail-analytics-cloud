@@ -1,0 +1,6 @@
+azure-storage-blob
+azure-identity
+pandas
+sqlalchemy
+pyodbc
+streamlit
