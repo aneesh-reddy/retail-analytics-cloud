@@ -1,5 +1,6 @@
 import os
 import glob
+import re
 import pandas as pd
 from azure.storage.blob import BlobServiceClient
 from sqlalchemy import create_engine, text
@@ -13,6 +14,14 @@ DB_NAME         = "RetailDB"
 DB_USER         = "sqladmin"
 DB_PASS         = "YourStrongP@ss!"
 # ────────────────────────────────────────────────────────
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Strip whitespace and collapse multiple spaces in column names."""
+    def clean(name: str) -> str:
+        # strip, then replace any run of whitespace with single underscore
+        return re.sub(r"\s+", "_", name.strip())
+    df.columns = [clean(col) for col in df.columns]
+    return df
 
 def download_blobs():
     """Download all CSVs from the rawdata container into data/raw/."""
@@ -53,12 +62,17 @@ def load_into_sql():
     df_t = pd.read_csv(t_file)
     df_p = pd.read_csv(p_file)
 
+    # Normalize column names to safe identifiers
+    df_h = normalize_columns(df_h)
+    df_t = normalize_columns(df_t)
+    df_p = normalize_columns(df_p)
+
     # Auto-parse any date-like columns in transactions
     for col in df_t.columns:
         if "DATE" in col.upper() or "PURCHASE" in col.upper():
             df_t[col] = pd.to_datetime(df_t[col], errors="coerce")
 
-    # URL-encode the password so '@' and '!' are safe
+    # URL-encode the password so special chars are safe
     enc_pass = urllib.parse.quote_plus(DB_PASS)
     conn_url = (
         f"mssql+pymssql://{DB_USER}:{enc_pass}"
@@ -72,19 +86,25 @@ def load_into_sql():
 
     # Bulk load in chunks
     print("Writing households...")
-    df_h.to_sql("households", engine,
-                if_exists="replace", index=False,
-                method="multi", chunksize=5000)
+    df_h.to_sql(
+        "households", engine,
+        if_exists="replace", index=False,
+        method="multi", chunksize=5000
+    )
 
     print("Writing transactions...")
-    df_t.to_sql("transactions", engine,
-                if_exists="replace", index=False,
-                method="multi", chunksize=5000)
+    df_t.to_sql(
+        "transactions", engine,
+        if_exists="replace", index=False,
+        method="multi", chunksize=5000
+    )
 
     print("Writing products...")
-    df_p.to_sql("products", engine,
-                if_exists="replace", index=False,
-                method="multi", chunksize=5000)
+    df_p.to_sql(
+        "products", engine,
+        if_exists="replace", index=False,
+        method="multi", chunksize=5000
+    )
 
     # Verify row counts
     with engine.connect() as conn:
