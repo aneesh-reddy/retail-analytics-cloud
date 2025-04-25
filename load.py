@@ -48,15 +48,13 @@ def load_into_sql():
             df_t[c] = pd.to_datetime(df_t[c], errors="coerce")
 
     # Build engine with zero timeout
-    url = (
-        f"mssql+pyodbc://{DB_USER}%40{SERVER_NAME}:{DB_PASS}"
-        f"@{SERVER_NAME}.database.windows.net:1433/{DB_NAME}"
-        "?driver=ODBC+Driver+17+for+SQL+Server"
+    conn_url = (
+        f"mssql+pymssql://{DB_USER}:{DB_PASS}"
+    f"@{SERVER_NAME}.database.windows.net:1433/{DB_NAME}"
+    "?encrypt=require"
     )
     engine = create_engine(
-        url,
-        fast_executemany=True,
-        connect_args={"timeout": 0}
+       conn_url
     )
 
     # Infinite cursor timeout
